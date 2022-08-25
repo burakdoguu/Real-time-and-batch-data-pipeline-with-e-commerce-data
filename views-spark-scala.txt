@@ -1,0 +1,19 @@
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.streaming.Trigger
+
+val kafkaDF = spark.readStream.format("kafka").option("kafka.bootstrap.servers","localhost:9092").option("subscribe","views-topic").load
+
+val schemaView = StructType(List(StructField("event",StringType),StructField("messageid",StringType),StructField("userid",StringType),StructField("properties",StructType(List(StructField("productid",StringType)))),StructField("context",StructType(List(StructField("source",StringType))))))
+
+val valueDF = kafkaDF.select(col("timestamp"),from_json(col("value").cast("string"), schemaView).alias("value"))
+val explodeDF = valueDF.selectExpr("value.event", "value.messageid", "value.userid","value.properties.productid","value.context.source","timestamp").as('v)
+
+val Mapdf = spark.read.csv("gs://hepsi-test/product-category-map.csv")
+val pcMapdf = Mapdf.withColumn("productid",expr("_c0")).withColumn("category",expr("_c1")).drop("_c0").drop("_c1")
+val mapDF = pcMapdf.select("productid","category").as('map)
+                                                      
+val matchDf = explodeDF.join(mapDF,$"v.productid"===$"map.productid")
+val newMatchDf = matchDf.select("event","messageid","userid","map.productid","source","timestamp","category") 
+                                                      
+val writeBigquery=newMatchDf.writeStream.format("bigquery").outputMode("append").option("temporaryGcsBucket","hepsi-test").option("checkpointLocation", "gs://hepsi-test/checkpointDir3").option("table", "total-fiber-356811.hepsi_case_test.views-category").trigger(Trigger.ProcessingTime("60 minutes")).start().awaitTermination()

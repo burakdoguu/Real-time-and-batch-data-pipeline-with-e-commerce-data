@@ -1,0 +1,24 @@
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.streaming.Trigger
+
+
+val kafkaDF = spark.readStream.format("kafka").option("kafka.bootstrap.servers","localhost:9092").option("subscribe","orders-topic").load
+
+val schemaOrder = StructType(List(StructField("event",StringType),StructField("messageid",StringType),StructField("userid",StringType),StructField("orderid",IntegerType),StructField("lineitems",ArrayType(StructType(List(StructField("productid",StringType),StructField("quantity",IntegerType)))))))
+
+val valueDF = kafkaDF.select(col("timestamp"),from_json(col("value").cast("string"), schemaOrder).alias("value"))
+val explodeDF = valueDF.selectExpr("value.event", "value.messageid", "value.userid", "value.orderid","timestamp","explode(value.lineitems) as lineItems")
+val flattened_df = explodeDF.withColumn("productid",expr("lineitems.productid")).withColumn("quantity",expr("lineitems.quantity")).drop("lineitems")
+val select_df = flattened_df.select(col("event"),col("messageid"),col("userid"),col("orderid"),col("timestamp"),col("productid"),col("quantity")).as('p)
+  
+                                                                                                                                                     
+val Mapdf = spark.read.csv("gs://hepsi-test/product-category-map.csv")
+val pcMapdf = Mapdf.withColumn("productid",expr("_c0")).withColumn("category",expr("_c1")).drop("_c0").drop("_c1")
+val mapDF = pcMapdf.select("productid","category").as('map)
+                                                 
+                                                      
+val matchDf = select_df.join(mapDF,$"p.productid"===$"map.productid") 
+val newMatchDf = matchDf.select("event","messageid","userid","orderid","map.productid","timestamp","quantity","category")   
+                                                                                                                                              
+val writeBigquery=newMatchDf.writeStream.format("bigquery").outputMode("append").option("temporaryGcsBucket","hepsi-test").option("checkpointLocation", "gs://hepsi-test/checkpointDir4").option("table", "total-fiber-356811.hepsi_case_test.orders-category").trigger(Trigger.ProcessingTime("60 minutes")).start().awaitTermination()
